@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Districts from PostGIS</title>
+
+    <link rel="stylesheet"
+          href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin="">
+
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+        }
+
+        body {
+            font-family: system-ui, sans-serif;
+            color: #23373b;
+            background: #f4f6f6;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            padding: 16px 24px 12px;
+            flex: 0 0 auto;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 22px;
+        }
+
+        .subtitle {
+            margin: 4px 0 0;
+            color: #5b6a6e;
+        }
+
+        #status {
+            margin: 8px 24px 0;
+            padding: 8px 12px;
+            border-radius: 6px;
+            display: none;
+        }
+
+        #status.error {
+            display: block;
+            background: #fdecea;
+            color: #8a1f11;
+        }
+
+        #status.info {
+            display: block;
+            background: #e8f1f8;
+            color: #1d4f73;
+        }
+
+        #map {
+            flex: 1 1 auto;
+            width: 100%;
+            height: calc(100vh - 90px);
+            min-height: 400px;
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1>Districts from PostGIS</h1>
+        <p class="subtitle">
+            <span id="count">loading...</span>,
+            served by Django from the database.
+        </p>
+    </header>
+
+    <div id="status" role="status"></div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+            crossorigin=""></script>
+
+    <script>
+        const DISTRICTS_URL = "{% url 'districts-geojson' %}";
+        const WHERE_URL = "{% url 'district-at' %}";
+        const statusEl = document.getElementById('status');
+        const countEl = document.getElementById('count');
+
+        function setStatus(message, kind) {
+            statusEl.textContent = message;
+            statusEl.className = kind;
+        }
+
+        const map = L.map('map').setView([30.3753, 69.3451], 5);
+
+        L.tileLayer(
+            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}',
+            {
+                maxZoom: 18,
+                attribution: 'Tiles &copy; Esri — World Topographic Map'
+            }
+        ).addTo(map);
+
+        const colours = {
+            'Punjab': '#1b9e77',
+            'Sindh': '#d95f02',
+            'Khyber Pakhtunkhwa': '#7570b3',
+            'Balochistan': '#e7298a',
+            'Islamabad': '#66a61e',
+            'Azad Kashmir': '#e6ab02',
+            'Gilgit Baltistan': '#a6761d'
+        };
+
+        async function loadDistricts() {
+            let response;
+
+            try {
+                response = await fetch(DISTRICTS_URL);
+            } catch (error) {
+                countEl.textContent = 'unable to load districts';
+                setStatus(
+                    'Could not reach the districts API. Check that the Django server is running.',
+                    'error'
+                );
+                return;
+            }
+
+            if (!response.ok) {
+                countEl.textContent = 'unable to load districts';
+                setStatus(
+                    'Districts API failed with status ' + response.status + '.',
+                    'error'
+                );
+                return;
+            }
+
+            let data;
+            try {
+                data = await response.json();
+            } catch (error) {
+                countEl.textContent = 'unable to load districts';
+                setStatus('Districts API did not return valid GeoJSON.', 'error');
+                return;
+            }
+
+            const features = Array.isArray(data.features) ? data.features : [];
+
+            if (features.length === 0) {
+                countEl.textContent = '0 districts';
+                setStatus(
+                    'The API returned no district features. Load district records into PostGIS, then refresh this page.',
+                    'info'
+                );
+                return;
+            }
+
+            const layer = L.geoJSON(data, {
+                style: function (feature) {
+                    const province = feature.properties && feature.properties.province;
+                    return {
+                        color: '#ffffff',
+                        weight: 1,
+                        fillColor: colours[province] || '#888888',
+                        fillOpacity: 0.7
+                    };
+                },
+                onEachFeature: function (feature, featureLayer) {
+                    const p = feature.properties || {};
+                    const name = p.name || 'Unnamed district';
+                    const label = p.province ? name + ', ' + p.province : name;
+                    featureLayer.bindTooltip(label, { sticky: true });
+                }
+            }).addTo(map);
+
+            const bounds = layer.getBounds();
+            if (bounds.isValid()) {
+                map.fitBounds(bounds, { padding: [20, 20] });
+            }
+
+            countEl.textContent = features.length + ' districts';
+        }
+
+        loadDistricts();
+
+        map.on('click', async function (e) {
+            try {
+                const url = WHERE_URL
+                    + '?lat=' + e.latlng.lat
+                    + '&lng=' + e.latlng.lng;
+
+                const response = await fetch(url);
+                const answer = await response.json();
+
+                const popupText = answer.district
+                    ? '<b>' + answer.district + '</b>, ' + answer.province
+                      + '<br>Population: ' + (answer.pop_2023 ?? 'Unknown')
+                    : 'Not inside any district';
+
+                L.popup()
+                    .setLatLng(e.latlng)
+                    .setContent(popupText)
+                    .openOn(map);
+            } catch (error) {
+                console.error('District lookup failed:', error);
+                L.popup()
+                    .setLatLng(e.latlng)
+                    .setContent('Could not retrieve district information.')
+                    .openOn(map);
+            }
+        });
+    </script>
+</body>
+
+</html>
